@@ -1,6 +1,9 @@
 from __future__ import division, print_function
 import multiprocessing
 import numpy as np
+import os
+import functools
+import itertools
 
 from bct.utils import BCTParamError, get_rng, binarize
 
@@ -73,22 +76,7 @@ def ttest_paired_stat_only(A, B, tail):
         return t
 
 
-def assign_comps(union_sets, num_elements, axis):
-    comps_list = []
-    for i in range(num_elements):
-        is_added = False
-        for set_index, s in enumerate(union_sets):
-            if i in s[axis]:
-                comps_list.append(set_index + 1)
-                is_added = True
-                break
-        if not is_added:
-            comps_list.append(0)
-
-    return comps_list
-
-
-def get_components(A, no_depend=False):
+def get_edge_components(A, no_depend=False):
     '''Short summary.
 
     Returns the components of an undirected graph specified by the binary and
@@ -103,8 +91,9 @@ def get_components(A, no_depend=False):
         Does nothing, included for backwards compatibility
     Returns
     -------
-    comps : Nx1 np.ndarray
-        vector of component assignments for each node
+    matrix with assigned edges -- sum all edges in component to get vector of edges size
+    comps : ([N], [M]) tuple of lists
+        tuple of vector of component assignments for each node
     comp_sizes : Mx1 np.ndarray
         vector of component sizes
     Notes
@@ -124,38 +113,39 @@ def get_components(A, no_depend=False):
     A = binarize(A, copy=True)
     n = A.shape[0]
     m = A.shape[1]
-    # np.fill_diagonal(A, 1)
+
     edge_map = [(u, v) for u in range(n) for v in range(m) if A[u, v] == 1]
-    union_sets = []
+    comp_list = []
+
+    # iterate through edge map and sort into components
     for item in edge_map:
-        if len(union_sets) == 0:
-            union_sets.append([[item[0]], [item[1]]])
-            continue
+        new_comp = [[item]]
 
-        for s in union_sets:
-            if item[0] in s[0] and item[1] in s[1]:
-                continue
-            elif item[0] in s[0]:
-                s[1].append(item[1])
-            elif item[1] in s[1]:
-                s[0].append(item[0])
-            else:
-                union_sets.append([[item[0]], [item[1]]])
+        # find connected edges
+        for s in comp_list:
+            for edge in s:
+                if item[0] == edge[0] or item[1] == edge[1]:
+                    new_comp.append(s)
+                    break
 
-    x_comps = assign_comps(union_sets, n, 0)
-    y_comps = assign_comps(union_sets, m, 1)
+        # remove merged sets from component list
+        for s in new_comp:
+            if s in comp_list:
+                comp_list.remove(s)
 
-    comps = (x_comps, y_comps)
+        # merge component and add new component to component list
+        new_comp = list(itertools.chain.from_iterable(new_comp))
+        comp_list.append(new_comp)
 
-    comp_sizes = np.array([len(s[0] + s[1]) for s in union_sets])
-    print(comps)
-    print(comp_sizes)
-    return comps, comp_sizes
+    # create list of component sizes
+    edge_sizes = np.array([len(s) for s in comp_list])
 
+    return comp_list, edge_sizes
 
 
 
-def nbs_rect(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, seed=None):
+
+def nbs_rect(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, seed=None, cores=os.cpu_count()):
     '''
     Performs the NBS for populations X and Y for a t-statistic threshold of
     alpha.
@@ -243,8 +233,6 @@ def nbs_rect(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, see
     if tail not in ('both', 'left', 'right'):
         raise BCTParamError('Tail must be both, left, right')
 
-    print(x)
-    print(y)
     n, m, num_sub_x = x.shape
     num_sub_y = y.shape[2]
 
@@ -255,7 +243,6 @@ def nbs_rect(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, see
         raise BCTParamError('Population matrices must be an equal size')
 
     # consider n x m edges
-    print([n, m])
     ixes = np.ones([n, m])
 
     # number of edges
@@ -273,7 +260,7 @@ def nbs_rect(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, see
     del x, y
 
     # perform t-test at each edge
-    t_stat = np.zeros((num_edges,))
+    t_stat = np.zeros((num_edges))
     for i in range(num_edges):
         if paired:
             t_stat[i] = ttest_paired_stat_only(xmat[i, :], ymat[i, :], tail)
@@ -292,89 +279,69 @@ def nbs_rect(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, see
     adj.resize([n, m])
     print('suprathreshold adjacency matrix')
     print(adj)
-    a, sz = get_components(adj)
+    comps, sz_comps = get_edge_components(adj)
+    nr_components = np.size(sz_comps)
 
-    # convert size from nodes to number of edges
-    # only consider components comprising more than one node (e.g. a/l 1 edge)
-
-    nr_components = np.size(sz)
-    sz_links = np.zeros((nr_components,))
-    for comp_index in range(1, nr_components + 1):
-        nodes, = comp_index == a[0]
-        print(nodes)
-        sz_links[i - 1] = np.sum(adj[np.ix_(nodes, nodes)]) / 2
-        adj[np.ix_(nodes, nodes)] *= (i + 2)
-
-    # subtract 1 to delete any edges not comprising a component
-    adj[np.where(adj)] -= 1
-
-    if np.size(sz_links):
-        max_sz = np.max(sz_links)
+    # get max component size
+    if np.size(sz_comps):
+        max_sz = np.max(sz_comps)
     else:
-        # max_sz=0
         raise BCTParamError('True matrix is degenerate')
     print('max component size is %i' % max_sz)
 
-    return
     # estimate empirical null distribution of maximum component size by
     # generating k independent permutations
     print('estimating null distribution with %i permutations' % k)
+    null_arr = np.zeros((k))
 
-    null = np.zeros((k,))
-    hit = 0
-    for u in range(k):
-        # randomize
-        if paired:
-            indperm = np.sign(0.5 - rng.rand(1, num_sub_x))
-            d = np.hstack((xmat, ymat)) * np.hstack((indperm, indperm))
-        else:
-            d = np.hstack((xmat, ymat))[
-                :, rng.permutation(num_sub_x + num_sub_y)]
+    # parallel processing of null distribution (drastically speeds up comp time)
+    pool = multiprocessing.Pool(cores)
+    null_arr = pool.map(functools.partial(permute, n, m, num_sub_x, num_sub_y, xmat, ymat, paired, tail, thresh, rng), null_arr)
 
-        t_stat_perm = np.zeros((m,))
-        for i in range(m):
-            if paired:
-                t_stat_perm[i] = ttest_paired_stat_only(
-                    d[i, :num_sub_x], d[i, -num_sub_x:], tail)
-            else:
-                t_stat_perm[i] = ttest2_stat_only(
-                    d[i, :num_sub_x], d[i, -num_sub_y:], tail)
-
-        ind_t, = np.where(t_stat_perm > thresh)
-
-        adj_perm = np.zeros(num_edges)
-        adj_perm[ind_t] = 1
-        adj_perm.resize([n, m])
-        a, sz = get_components(adj_perm)
-
-        ind_sz, = np.where(sz > 1)
-        ind_sz += 1
-        nr_components_perm = np.size(ind_sz)
-        sz_links_perm = np.zeros((nr_components_perm))
-        for i in range(nr_components_perm):
-            nodes, = np.where(ind_sz[i] == a)
-            sz_links_perm[i] = np.sum(adj_perm[np.ix_(nodes, nodes)]) / 2
-
-        if np.size(sz_links_perm):
-            null[u] = np.max(sz_links_perm)
-        else:
-            null[u] = 0
-
-        # compare to the true dataset
-        if null[u] >= max_sz:
-            hit += 1
-
-        if verbose:
-            print(('permutation %i of %i.  Permutation max is %s.  Observed max'
-                   ' is %s.  P-val estimate is %.3f') % (
-                u, k, null[u], max_sz, hit / (u + 1)))
-        elif (u % (k / 10) == 0 or u == k - 1):
-            print('permutation %i of %i.  p-value so far is %.3f' % (u, k,
-                                                                     hit / (u + 1)))
-
-    pvals = np.zeros((nr_components,))
     # calculate p-vals
+    pvals = np.zeros((nr_components))
     for i in range(nr_components):
-        pvals[i] = np.size(np.where(null >= sz_links[i])) / k
+        print(f'component index: {i}')
+        print(f'comp size: {sz_comps[i]}')
+        pvals[i] = np.size(np.where(null_arr >= sz_comps[i])) / k
+        print(f'p-value: {pvals[i]:.4f}')
 
-    return pvals, adj, null
+    return pvals, adj, null_arr, sz_comps
+
+
+def permute(n, m, num_sub_x, num_sub_y, xmat, ymat, paired, tail, thresh, rng, null):
+    num_edges = n * m
+
+    # randomize
+    if paired:
+        indperm = np.sign(0.5 - rng.rand(1, num_sub_x))
+        d = np.hstack((xmat, ymat)) * np.hstack((indperm, indperm))
+    else:
+        d = np.hstack((xmat, ymat))[:, rng.permutation(num_sub_x + num_sub_y)]
+
+    # ttest on each edge to get suprathresholded edges
+    t_stat_perm = np.zeros((num_edges))
+    for i in range(num_edges):
+        if paired:
+            t_stat_perm[i] = ttest_paired_stat_only(
+                d[i, :num_sub_x], d[i, -num_sub_x:], tail)
+        else:
+            t_stat_perm[i] = ttest2_stat_only(
+                d[i, :num_sub_x], d[i, -num_sub_y:], tail)
+    ind_t, = np.where(t_stat_perm > thresh)
+
+    # adjacency matrix with ones denoting suprathresholded edges
+    adj_perm = np.zeros((num_edges))
+    adj_perm[ind_t] = 1
+    adj_perm.resize([n, m])
+
+    # isolate components and find size
+    comps, sz_comps = get_edge_components(adj_perm)
+
+    # max size of null components
+    if np.size(sz_comps):
+        null = np.max(sz_comps)
+    else:
+        null = 0
+
+    return null

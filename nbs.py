@@ -57,7 +57,6 @@ def get_components(A, no_depend=False):
         temp.append(item)
         union_sets = temp
 
-    print(union_sets)
     comps = np.array([i+1 for v in range(n) for i in
         range(len(union_sets)) if v in union_sets[i]])
     comp_sizes = np.array([len(s) for s in union_sets])
@@ -237,7 +236,7 @@ def nbs_bct(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, seed
     print(adj)
     print(a)
     print(sz)
-    return
+
     # convert size from nodes to number of edges
     # only consider components comprising more than one node (e.g. a/l 1 edge)
     ind_sz, = np.where(sz > 1)
@@ -251,7 +250,9 @@ def nbs_bct(x, y, thresh, k=1000, tail='both', paired=False, verbose=False, seed
         nodes, = np.where(ind_sz[i] == a)
         print(nodes)
         sz_links[i] = np.sum(adj[np.ix_(nodes, nodes)]) / 2
+        print(sz_links)
         adj[np.ix_(nodes, nodes)] *= (i + 2)
+        print(adj)
 
     print(adj)
     # subtract 1 to delete any edges not comprising a component
